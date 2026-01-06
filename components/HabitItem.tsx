@@ -54,7 +54,7 @@ export const HabitItem: React.FC<HabitItemProps> = ({ habit, onToggle, onDelete 
              <span className={`text-lg font-bold truncate transition-all ${
                 habit.completed ? 'text-slate-400 line-through opacity-70' : 'text-slate-700'
              }`}>
-                {habit.icon} {habit.title}
+                {habit.title}
              </span>
              {/* Coins Reward Badge */}
              <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 text-amber-500 text-xs font-bold border border-amber-100">

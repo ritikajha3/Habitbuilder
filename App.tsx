@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Plus, Trophy, Coins, Sparkles, LayoutList, Timer, Calendar as CalendarIcon } from 'lucide-react';
+import { Plus, Trophy, Coins, Sparkles, LayoutList, Timer, Calendar as CalendarIcon, Loader2, WifiOff } from 'lucide-react';
 import { differenceInCalendarDays, isSameDay, parseISO, format } from 'date-fns';
 
 import { Avatar } from './components/Avatar';
@@ -9,9 +9,11 @@ import { FocusTimer } from './components/FocusTimer';
 import { CalendarView } from './components/CalendarView';
 import { LightningStrike, Confetti } from './components/Effects';
 import { getGeminiMotivation, suggestHabit } from './services/geminiService';
+import { api } from './services/api'; // Import the new API service
 import { Habit, UserStats, AvatarState, Priority, Frequency } from './types';
 
-const INITIAL_STATS: UserStats = {
+// Fallback initial state (used before data loads)
+const EMPTY_STATS: UserStats = {
   level: 1,
   xp: 0,
   coins: 0,
@@ -22,21 +24,11 @@ const INITIAL_STATS: UserStats = {
   history: {} 
 };
 
-const DEFAULT_HABITS: Habit[] = [
-  { id: '1', title: 'Drink Water', completed: false, streak: 0, lastCompleted: null, icon: '💧', color: '#60A5FA', priority: 'medium', frequency: 'daily', coinValue: 10 },
-  { id: '2', title: 'Read 10 Pages', completed: false, streak: 0, lastCompleted: null, icon: '📚', color: '#F472B6', priority: 'low', frequency: 'daily', coinValue: 5 },
-];
-
 export default function App() {
-  const [habits, setHabits] = useState<Habit[]>(() => {
-    const saved = localStorage.getItem('hero_habits');
-    return saved ? JSON.parse(saved) : DEFAULT_HABITS;
-  });
-
-  const [stats, setStats] = useState<UserStats>(() => {
-    const saved = localStorage.getItem('hero_stats');
-    return saved ? JSON.parse(saved) : INITIAL_STATS;
-  });
+  const [habits, setHabits] = useState<Habit[]>([]);
+  const [stats, setStats] = useState<UserStats>(EMPTY_STATS);
+  const [isLoadingData, setIsLoadingData] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<'HABITS' | 'FOCUS' | 'CALENDAR'>('HABITS');
   const [avatarState, setAvatarState] = useState<AvatarState>('IDLE');
@@ -52,49 +44,75 @@ export default function App() {
   const [newHabitFreq, setNewHabitFreq] = useState<Frequency>('daily');
   const [newHabitTime, setNewHabitTime] = useState("");
 
+  // --- INITIAL DATA LOAD & DAILY RESET LOGIC ---
   useEffect(() => {
-    localStorage.setItem('hero_habits', JSON.stringify(habits));
-    localStorage.setItem('hero_stats', JSON.stringify(stats));
-  }, [habits, stats]);
+    const initData = async () => {
+      try {
+        setIsLoadingData(true);
+        // Parallel fetch for speed
+        const [fetchedStats, fetchedHabits] = await Promise.all([
+          api.getUserStats(),
+          api.getHabits()
+        ]);
 
-  // DAILY RESET & PUNISHMENT LOGIC
-  useEffect(() => {
-    const today = new Date();
-    const lastLogin = stats.lastLoginDate ? parseISO(stats.lastLoginDate) : new Date();
-    
-    if (!isSameDay(today, lastLogin)) {
-      const daysDiff = differenceInCalendarDays(today, lastLogin);
-      
-      // Reset only daily habits
-      const updatedHabits = habits.map(h => ({
-         ...h, 
-         completed: h.frequency === 'daily' ? false : h.completed 
-      }));
-      
-      let newStreak = stats.totalStreak;
-      let struckByLightning = false;
+        const today = new Date();
+        const lastLogin = fetchedStats.lastLoginDate ? parseISO(fetchedStats.lastLoginDate) : new Date();
+        
+        let finalStats = { ...fetchedStats };
+        let finalHabits = [...fetchedHabits];
+        let needsSync = false;
+        let struckByLightning = false;
 
-      // Zap if missed yesterday
-      if (daysDiff > 1) {
-         newStreak = 0;
-         struckByLightning = true;
+        // Check if day has changed
+        if (!isSameDay(today, lastLogin)) {
+          const daysDiff = differenceInCalendarDays(today, lastLogin);
+          needsSync = true;
+
+          // Reset only daily habits
+          finalHabits = finalHabits.map(h => ({
+             ...h, 
+             completed: h.frequency === 'daily' ? false : h.completed 
+          }));
+          
+          let newStreak = finalStats.totalStreak;
+
+          // Zap if missed yesterday (gap > 1 day)
+          if (daysDiff > 1) {
+             newStreak = 0;
+             struckByLightning = true;
+          }
+          
+          finalStats.lastLoginDate = today.toISOString();
+          finalStats.totalStreak = newStreak;
+        }
+
+        setStats(finalStats);
+        setHabits(finalHabits);
+
+        // Sync changes back to backend if logic modified them
+        if (needsSync) {
+          await api.updateUserStats(finalStats);
+          // For habits, we update them one by one or in batch if API supported it.
+          // Here we just fire and forget the updates for simplicity or rely on UserStats update being key
+          Promise.all(finalHabits.map(h => api.updateHabit(h)));
+        }
+
+        if (struckByLightning) {
+          triggerLightning();
+        } else if (!isSameDay(today, lastLogin)) {
+          setMotivation("A fresh new day! Let's keep that streak alive! ✨");
+        }
+
+      } catch (err) {
+        console.error("Failed to load data:", err);
+        setError("Could not connect to the server.");
+      } finally {
+        setIsLoadingData(false);
       }
-      
-      setHabits(updatedHabits);
-      setStats(prev => ({
-        ...prev,
-        lastLoginDate: today.toISOString(),
-        totalStreak: newStreak
-      }));
+    };
 
-      if (struckByLightning) {
-        triggerLightning();
-      } else {
-        setMotivation("A fresh new day! Let's keep that streak alive! ✨");
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); 
+    initData();
+  }, []);
 
   const triggerLightning = () => {
     setShowLightning(true);
@@ -106,11 +124,16 @@ export default function App() {
     }, 2000);
   };
 
-  const handleToggleHabit = useCallback((id: string) => {
+  const handleToggleHabit = useCallback(async (id: string) => {
+    // 1. Optimistic Update
+    let habitToUpdate: Habit | undefined;
+    let isCompleting = false;
+
     setHabits(prevHabits => {
       const newHabits = prevHabits.map(habit => {
         if (habit.id === id) {
-          const isCompleting = !habit.completed;
+          habitToUpdate = habit;
+          isCompleting = !habit.completed;
           return {
             ...habit,
             completed: isCompleting,
@@ -120,61 +143,90 @@ export default function App() {
         }
         return habit;
       });
-
-      const habit = prevHabits.find(h => h.id === id);
-      const isCompleting = habit && !habit.completed;
-
-      if (isCompleting && habit) {
-         setAvatarState('HAPPY');
-         setShowConfetti(true);
-         setTimeout(() => setAvatarState('IDLE'), 2000);
-         setTimeout(() => setShowConfetti(false), 2000);
-      }
-
-      const todayKey = format(new Date(), 'yyyy-MM-dd');
-      const dailyCompleted = newHabits.filter(h => h.completed).length;
-      const dailyTotal = newHabits.length;
-
-      setStats(curr => {
-          let newXp = curr.xp;
-          let newCoins = curr.coins;
-          let newLevel = curr.level;
-          let newTotalStreak = curr.totalStreak;
-
-          if (habit && isCompleting) {
-             newXp += habit.coinValue;
-             newCoins += habit.coinValue;
-             newLevel = Math.floor(newXp / 100) + 1;
-             
-             const activeToday = prevHabits.some(h => h.completed); 
-             if (!activeToday) newTotalStreak += 1;
-          } else if (habit && !isCompleting) {
-             newCoins = Math.max(0, newCoins - habit.coinValue);
-          }
-
-          return {
-              ...curr,
-              xp: newXp,
-              coins: newCoins,
-              level: newLevel,
-              totalStreak: newTotalStreak,
-              history: {
-                  ...curr.history,
-                  [todayKey]: {
-                      completed: dailyCompleted,
-                      total: dailyTotal,
-                      allCompleted: dailyCompleted === dailyTotal && dailyTotal > 0
-                  }
-              }
-          };
-      });
-
       return newHabits;
     });
-  }, []);
 
-  const handleDeleteHabit = (id: string) => {
+    if (!habitToUpdate) return;
+
+    // 2. Calculate New Stats
+    let newStats = { ...stats };
+    const habit = habitToUpdate as Habit; // Typescript safety
+    
+    // We need to calculate based on the STATE of habits AFTER toggle.
+    // Since setHabits is async, we manually calculate the derived state here for the stats.
+    // NOTE: This logic mimics the previous local implementation but now we prepare it for the API.
+    
+    if (isCompleting) {
+        setAvatarState('HAPPY');
+        setShowConfetti(true);
+        setTimeout(() => setAvatarState('IDLE'), 2000);
+        setTimeout(() => setShowConfetti(false), 2000);
+
+        newStats.xp += habit.coinValue;
+        newStats.coins += habit.coinValue;
+        newStats.level = Math.floor(newStats.xp / 100) + 1;
+        
+        // Check if this was the first completion today to increment streak?
+        // Actually the logic was: if NO OTHER habits are completed today, increment streak.
+        const otherActive = habits.some(h => h.id !== id && h.completed); 
+        if (!otherActive) newStats.totalStreak += 1;
+    } else {
+        newStats.coins = Math.max(0, newStats.coins - habit.coinValue);
+        // Decrement streak? The original logic didn't explicitly decrement totalStreak on untoggle 
+        // usually to be kind, but we can leave it as is.
+    }
+
+    // Update History
+    const todayKey = format(new Date(), 'yyyy-MM-dd');
+    const updatedHabitsList = habits.map(h => h.id === id ? { ...h, completed: isCompleting } : h);
+    const dailyCompleted = updatedHabitsList.filter(h => h.completed).length;
+    const dailyTotal = updatedHabitsList.length;
+
+    newStats.history = {
+        ...newStats.history,
+        [todayKey]: {
+            completed: dailyCompleted,
+            total: dailyTotal,
+            allCompleted: dailyCompleted === dailyTotal && dailyTotal > 0
+        }
+    };
+
+    setStats(newStats);
+
+    // 3. Sync to Backend
+    try {
+        // We construct the updated habit object
+        const updatedHabit = {
+            ...habit,
+            completed: isCompleting,
+            streak: isCompleting ? habit.streak + 1 : Math.max(0, habit.streak - 1),
+            lastCompleted: isCompleting ? new Date().toISOString() : habit.lastCompleted
+        };
+
+        await Promise.all([
+            api.updateHabit(updatedHabit),
+            api.updateUserStats(newStats)
+        ]);
+    } catch (err) {
+        console.error("Sync failed", err);
+        // Ideally revert optimistic update here, but for now just alert
+        setMotivation("Sync failed... check connection! 🔌");
+    }
+
+  }, [habits, stats]);
+
+  const handleDeleteHabit = async (id: string) => {
+    // Optimistic UI
+    const previousHabits = [...habits];
     setHabits(prev => prev.filter(h => h.id !== id));
+
+    try {
+        await api.deleteHabit(id);
+    } catch (err) {
+        console.error("Delete failed", err);
+        setHabits(previousHabits); // Revert
+        setMotivation("Could not delete task.");
+    }
   };
 
   const getCoinValueForPriority = (p: Priority) => {
@@ -185,17 +237,17 @@ export default function App() {
       }
   };
 
-  const handleAddHabit = (e: React.FormEvent) => {
+  const handleAddHabit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newHabitTitle.trim()) return;
     
     const newHabit: Habit = {
-        id: Date.now().toString(),
+        id: Date.now().toString(), // Backend usually assigns ID, but for optimistic/mock we do it here
         title: newHabitTitle,
         completed: false,
         streak: 0,
         lastCompleted: null,
-        icon: '✨',
+        icon: undefined,
         color: '#6366f1',
         priority: newHabitPriority,
         frequency: newHabitFreq,
@@ -203,14 +255,23 @@ export default function App() {
         scheduledTime: newHabitTime || undefined
     };
 
+    // Optimistic
     setHabits([...habits, newHabit]);
+    setShowAddModal(false);
     
     // Reset Form
     setNewHabitTitle("");
     setNewHabitPriority('medium');
     setNewHabitFreq('daily');
     setNewHabitTime("");
-    setShowAddModal(false);
+
+    try {
+        await api.createHabit(newHabit);
+    } catch (err) {
+        console.error("Create failed", err);
+        setHabits(habits); // Revert to old list
+        setMotivation("Failed to save new task.");
+    }
   };
 
   const handleGetMotivation = async () => {
@@ -244,15 +305,20 @@ export default function App() {
             completed: false,
             streak: 0,
             lastCompleted: null,
-            icon: suggestion.icon || '🎀',
+            icon: undefined,
             color: suggestion.color || '#F472B6',
             priority: 'medium',
             frequency: 'daily',
             coinValue: 10
         };
+        
+        // Optimistic add
         setHabits([...habits, newHabit]);
         setAvatarState('HAPPY');
         setMotivation(`Added: ${suggestion.title}`);
+        
+        await api.createHabit(newHabit);
+
     } catch(e) {
         setMotivation("Try again later! 💫");
     }
@@ -267,8 +333,40 @@ export default function App() {
     setTimeout(() => setAvatarState('IDLE'), 2000);
   };
 
-  const completedCount = habits.filter(h => h.completed).length;
+  const completedCount = habits.length > 0 ? habits.filter(h => h.completed).length : 0;
   const progress = habits.length > 0 ? (completedCount / habits.length) * 100 : 0;
+
+  // --- LOADING SCREEN ---
+  if (isLoadingData) {
+      return (
+          <div className="min-h-screen bg-rose-50 flex flex-col items-center justify-center text-slate-400">
+              <motion.div 
+                 animate={{ rotate: 360 }}
+                 transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+              >
+                  <Loader2 size={48} className="text-violet-400" />
+              </motion.div>
+              <p className="mt-4 font-bold text-sm tracking-wider">LOADING HABIT HERO...</p>
+          </div>
+      );
+  }
+
+  // --- ERROR STATE ---
+  if (error) {
+      return (
+          <div className="min-h-screen bg-rose-50 flex flex-col items-center justify-center text-slate-500 p-8 text-center">
+              <WifiOff size={64} className="text-slate-300 mb-4" />
+              <h2 className="text-xl font-bold mb-2">Connection Error</h2>
+              <p className="mb-6">{error}</p>
+              <button 
+                onClick={() => window.location.reload()}
+                className="px-6 py-2 bg-violet-500 text-white rounded-full font-bold shadow-lg hover:bg-violet-600 transition"
+              >
+                  Try Again
+              </button>
+          </div>
+      );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-rose-50 via-indigo-50 to-sky-50 text-slate-700 overflow-hidden relative font-sans selection:bg-pink-200">
